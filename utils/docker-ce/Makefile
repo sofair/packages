@@ -1,31 +1,30 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=docker-ce
-PKG_VERSION:=19.03.3
+PKG_VERSION:=19.03.12
 PKG_RELEASE:=2
 PKG_LICENSE:=Apache-2.0
 PKG_LICENSE_FILES:=components/cli/LICENSE components/engine/LICENSE
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/docker/docker-ce/tar.gz/v$(PKG_VERSION)?
-PKG_HASH:=63b0d28608f32573b9c03fa46247c6f959e9c08133ddf30a71276919de0194c0
-PKG_SOURCE_VERSION:=a872fc2f86
+PKG_HASH:=d321f959e41fd9b24c23d95779d30d9ead1120bfddedf157ef5c047cf3d997a1
+PKG_SOURCE_VERSION:=48a66213fe # SHA1 used within the docker executables
 
 PKG_MAINTAINER:=Gerard Ryan <G.M0N3Y.2503@gmail.com>
 
-define CheckExpectedSrcVer
-	$(eval SRC_VER:=$(shell grep --only-matching --perl-regexp '(?<=PKG_SOURCE_VERSION:=)(.*)' $(1)))
-	$(if $(subst $(2),,$(SRC_VER)), \
-		$(error ERROR: Expected $(1) source version '$(2)', found '$(SRC_VER)'), \
-		$(info OK: Expected $(1) source version '$(2)', found '$(SRC_VER)') \
+# $(1) = path to dependent package 'Makefile'
+# $(2) = relevant docker-ce '.installer' file
+define EnsureVendoredVersion
+	( \
+		DEP_VER=$$$$( grep --only-matching --perl-regexp '(?<=PKG_SOURCE_VERSION:=)(.*)' "$(1)" ); \
+		VEN_VER=$$$$( grep --only-matching --perl-regexp '(?<=_COMMIT:=)(.*)(?=})' "$(PKG_BUILD_DIR)/components/engine/hack/dockerfile/install/$(2)" ); \
+		if [ $$$$VEN_VER != $$$$DEP_VER ]; then \
+			echo "ERROR: Expected 'PKG_SOURCE_VERSION:=$$$$VEN_VER' in '$(1)', found 'PKG_SOURCE_VERSION:=$$$$DEP_VER'"; \
+			exit 1; \
+		fi \
 	)
 endef
-
-# values from respective '.installer' files at https://github.com/docker/docker-ce/blob/v$(PKG_VERSION)/components/engine/hack/dockerfile/install/
-$(eval $(call CheckExpectedSrcVer,../containerd/Makefile,b34a5c8af56e510852c35414db4c1f4fa6172339))
-$(eval $(call CheckExpectedSrcVer,../libnetwork/Makefile,45c710223c5fbf04dc3028b9a90b51892e36ca7f))
-$(eval $(call CheckExpectedSrcVer,../runc/Makefile,3e425f80a8c931f88e6d94a8c831b9d5aa481657))
-$(eval $(call CheckExpectedSrcVer,../tini/Makefile,fec3683b971d9c3ef73f284f176672c44b448662))
 
 PKG_BUILD_DEPENDS:=golang/host
 PKG_BUILD_PARALLEL:=1
@@ -44,16 +43,29 @@ define Package/docker-ce
   CATEGORY:=Utilities
   TITLE:=Docker Community Edition
   URL:=https://www.docker.com/
-  DEPENDS:=$(GO_ARCH_DEPENDS) @HAS_FPU @TARGET_x86_64||arm||aarch64 +btrfs-progs +ca-certificates +cgroupfs-mount +containerd +libdevmapper +libnetwork +tini \
-           +DOCKER_SECCOMP:libseccomp +iptables-mod-extra +kmod-br-netfilter +kmod-ikconfig +kmod-nf-conntrack-netlink +kmod-nf-ipvs +kmod-veth \
-           +@KERNEL_CGROUPS  +@KERNEL_CGROUP_CPUACCT +@KERNEL_CGROUP_SCHED
+  DEPENDS:=$(GO_ARCH_DEPENDS) @(aarch64||arm||x86_64) +btrfs-progs +ca-certificates +cgroupfs-mount +containerd +libdevmapper +libnetwork +tini \
+           +DOCKER_SECCOMP:libseccomp +iptables-mod-extra +kmod-br-netfilter +kmod-ikconfig +kmod-nf-conntrack-netlink +kmod-nf-ipvs +kmod-veth
   USERID:=docker:docker
+  MENU:=1
+endef
 
+define Package/docker-ce/conffiles
+/etc/config/dockerd
 endef
 
 define Package/docker-ce/description
   Docker Engine is used by millions enables containerized applications
   to run anywhere consistently on any infrastructure.
+endef
+
+define Build/Prepare
+	$(Build/Prepare/Default)
+
+	# Verify dependencies are the vendored version
+	$(call EnsureVendoredVersion,../containerd/Makefile,containerd.installer)
+	$(call EnsureVendoredVersion,../libnetwork/Makefile,proxy.installer)
+	$(call EnsureVendoredVersion,../runc/Makefile,runc.installer)
+	$(call EnsureVendoredVersion,../tini/Makefile,tini.installer)
 endef
 
 define Build/Configure
@@ -79,13 +91,7 @@ endif
 
 define Build/Compile
 	( \
-		export GOPATH=$(GO_PKG_BUILD_DIR) \
-			GOCACHE=$(GO_PKG_CACHE_DIR) \
-			GOTMPDIR=$(GO_PKG_TMP_DIR) \
-			GOROOT_FINAL=$(GO_TARGET_ROOT) \
-			CC=$(TARGET_CC) \
-			CXX=$(TARGET_CXX) \
-			$(call GoPackage/Environment) \
+		export $(GO_PKG_VARS) \
 			GITCOMMIT=$(PKG_SOURCE_VERSION) \
 			DOCKER_GITCOMMIT=$(PKG_SOURCE_VERSION) \
 			DOCKER_BUILDTAGS='$(BUILDTAGS)' \
@@ -107,6 +113,7 @@ define Build/Compile
 endef
 
 define Package/docker-ce/install
+	$(CP) ./files/* $(1)/
 	$(INSTALL_DIR) $(1)/usr/bin/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/cli/build/docker $(1)/usr/bin/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/engine/bundles/binary-daemon/dockerd $(1)/usr/bin/
@@ -118,8 +125,13 @@ define Package/docker-ce/install
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/dockerd.init $(1)/etc/init.d/dockerd
 
-	$(INSTALL_DIR) $(1)/etc/docker
-	$(INSTALL_CONF) ./files/daemon.json $(1)/etc/docker/
+	$(INSTALL_DIR) $(1)/etc/config
+	$(INSTALL_CONF) ./files/etc/config/dockerd $(1)/etc/config/dockerd
+
+	# Must be after systcl 11-br-netfilter.conf from kmod-br-netfilter
+	$(INSTALL_DIR) $(1)/etc/sysctl.d
+	$(INSTALL_DATA) ./files/etc/sysctl.d/sysctl-br-netfilter-ip.conf \
+		$(1)/etc/sysctl.d/12-br-netfilter-ip.conf
 endef
 
 $(eval $(call BuildPackage,docker-ce))
